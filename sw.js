@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scaner-dlkom-v2';
+const CACHE_NAME = 'scaner-dlkom-v3';
 const ASSETS = [
     './',
     './index.html',
@@ -7,19 +7,17 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (event) => {
-    event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => {
-            return cache.addAll(ASSETS);
-        })
-    );
     self.skipWaiting();
+    event.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+    );
 });
 
 self.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then((keys) => {
             return Promise.all(
-                keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))
+                keys.map((key) => caches.delete(key))
             );
         })
     );
@@ -27,6 +25,7 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+    // Estrategia Network-First para asegurar actualizaciones
     event.respondWith(
         fetch(event.request).catch(() => caches.match(event.request))
     );
