@@ -1,0 +1,8 @@
+
+{
+  "name": "GeminiScan Pro",
+  "description": "A high-performance document scanner with AI-powered OCR, intelligent image cleaning, multiple filters, and seamless PDF export for cloud workflows.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
