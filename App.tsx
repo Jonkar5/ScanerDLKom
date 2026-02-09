@@ -6,16 +6,26 @@ import {
   Plus, ChevronRight, Save, Edit3, Image as ImageIcon,
   Users, CreditCard, TrendingUp, Calendar, LayoutGrid
 } from 'lucide-react';
-import { AppStep, FilterType, ProcessingState, ScanResult, PageData } from './types';
+import { AppStep, FilterType, ProcessingState, ScanResult, PageData, Point } from './types';
 import { analyzeDocument } from './services/geminiService';
 import { generatePDF, simulateCloudUpload } from './services/pdfService';
+import { autoDetectEdges, applyAdaptiveThreshold, applyPerspectiveTransform, applyMagicColor } from './services/imageProcessor';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const App: React.FC = () => {
   const [step, setStep] = useState<AppStep>(AppStep.IDLE);
   const [pages, setPages] = useState<PageData[]>([]);
+  const pagesRef = useRef<PageData[]>([]);
   const [activePageIndex, setActivePageIndex] = useState<number | null>(null);
   const [scanHistory, setScanHistory] = useState<ScanResult[]>([]);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const addLog = (msg: string) => {
+    console.log(msg);
+    setLogs(prev => [new Date().toLocaleTimeString() + ": " + msg, ...prev].slice(0, 10));
+  };
+
+  useEffect(() => { pagesRef.current = pages; }, [pages]);
 
   const [onedrivePath, setOnedrivePath] = useState(() =>
     localStorage.getItem('onedrive_path') || 'OneDrive/Compartida/Escaneos_Socio'
@@ -26,6 +36,14 @@ const App: React.FC = () => {
   const [companyLogo, setCompanyLogo] = useState(() => localStorage.getItem('company_logo') || '');
   const [companyStamp, setCompanyStamp] = useState(() => localStorage.getItem('company_stamp') || '');
   const [userSignature, setUserSignature] = useState(() => localStorage.getItem('user_signature') || '');
+
+  const [dialog, setDialog] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+    type: 'confirm' | 'alert';
+    onConfirm?: () => void;
+  }>({ show: false, title: '', message: '', type: 'alert' });
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -105,9 +123,77 @@ const App: React.FC = () => {
       });
       if (videoRef.current) videoRef.current.srcObject = stream;
     } catch (err) {
-      alert("Error: Activa los permisos de cámara.");
+      setDialog({
+        show: true,
+        title: 'Error de Cámara',
+        message: 'Por favor, activa los permisos de cámara para poder escanear.',
+        type: 'alert'
+      });
       setStep(AppStep.IDLE);
     }
+  };
+
+  const getPerspectiveTransform = (src: Point[], dst: Point[]) => {
+    // Implementación simplificada de homografía para 4 puntos
+    // Para una potencia real sin OpenCV.js externo, usamos una aproximación de warp
+    return ""; // Placeholder for real logic if needed for CSS
+  };
+
+  const performCrop = (index: number, specificPage?: PageData) => {
+    const page = specificPage || pagesRef.current[index];
+    if (!page) {
+      addLog("Fallo: Página no encontrada en índice " + index);
+      return;
+    }
+    addLog(`Enderezando perspectiva... (Pts: ${JSON.stringify(page.cropPoints?.[0])})`);
+    const points = page.cropPoints || [];
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0);
+
+        // El nuevo motor hace el "warp" real
+        const croppedUrl = applyPerspectiveTransform(canvas, points);
+
+        setPages(prev => {
+          const updated = [...prev];
+          updated[index] = { ...updated[index], cropped: croppedUrl, processed: croppedUrl };
+          return updated;
+        });
+        setStep(AppStep.REVIEW);
+        addLog("Página enderezada y recortada con éxito.");
+      }
+    };
+    img.src = page.original;
+  };
+
+  const updateCropPoint = (index: number, pointIndex: number, x: number, y: number) => {
+    setPages(prev => {
+      const updated = [...prev];
+      const p = updated[index];
+      const cp = [...(p.cropPoints || [])];
+      cp[pointIndex] = { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+      updated[index] = { ...p, cropPoints: cp };
+      return updated;
+    });
+  };
+
+  const rotatePage = (index: number, direction: 'left' | 'right') => {
+    setPages(prev => {
+      const updated = [...prev];
+      const p = updated[index];
+      const currentRotation = p.processing.rotation || 0;
+      const newRotation = direction === 'right' ? (currentRotation + 90) % 360 : (currentRotation - 90 + 360) % 360;
+      updated[index] = { ...p, processing: { ...p.processing, rotation: newRotation } };
+      return updated;
+    });
+    // Necesitamos re-procesar la imagen para aplicar la rotación al canvas
+    setTimeout(() => applyFilterToPage(index, { ...pages[index].processing, rotation: (pages[index].processing.rotation + (direction === 'right' ? 90 : -90) + 360) % 360 }), 50);
   };
 
   const capturePhoto = () => {
@@ -119,36 +205,103 @@ const App: React.FC = () => {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        addLog("Foto capturada. Detectando bordes...");
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+
+        // Auto-detección de bordes real
+        const detectedPoints = autoDetectEdges(canvas);
+        addLog("Bordes detectados: " + JSON.stringify(detectedPoints[0]));
+
         const newPage: PageData = {
           id: Date.now().toString(),
           original: dataUrl,
+          cropped: dataUrl,
           processed: dataUrl,
-          processing: { brightness: 100, contrast: 120, saturation: 100, filter: 'clean' }
+          processing: {
+            brightness: 100,
+            contrast: 130,
+            saturation: 100,
+            filter: 'magic', // Ahora por defecto para impresionar con nitidez
+            removeShadows: true,
+            rotation: 0
+          },
+          cropPoints: detectedPoints
         };
+
+        const newIndex = pagesRef.current.length;
         setPages(prev => [...prev, newPage]);
+        setActivePageIndex(newIndex);
+        addLog(`Página ${newIndex} en cola.`);
+
+        // Feedback visual y HÁPTICO
+        if ('vibrate' in navigator) navigator.vibrate(50);
+        const videoEl = videoRef.current;
+        videoEl.style.opacity = '0.4';
+        setTimeout(() => {
+          if (videoRef.current) videoRef.current.style.opacity = '0.9';
+
+          // FLUJO AUTOMÁTICO: Recortar y Aplicar Filtro Magia Pro instantáneamente
+          setTimeout(() => {
+            performCrop(newIndex, newPage); // Pass newPage directly
+            setTimeout(() => {
+              // Re-leer de ref para asegurar que tenemos la página recortada
+              const updatedPage = pagesRef.current[newIndex];
+              if (updatedPage) {
+                applyFilterToPage(newIndex, { ...newPage.processing, filter: 'magic' }, updatedPage);
+                addLog("Limpieza Magia Pro aplicada.");
+              }
+            }, 500);
+          }, 300);
+        }, 100);
       }
     }
   };
 
-  const applyFilterToPage = (index: number, state: ProcessingState) => {
-    const page = pages[index];
+  const applyFilterToPage = (index: number, state: ProcessingState, specificPage?: PageData) => {
+    const page = specificPage || pagesRef.current[index];
+    if (!page) return;
+    addLog(`Aplicando filtro ${state.filter} a página ${index}...`);
     const img = new Image();
+    img.crossOrigin = "anonymous";
     img.onload = () => {
       const canvas = document.createElement('canvas');
       canvas.width = img.width;
       canvas.height = img.height;
       const ctx = canvas.getContext('2d');
       if (ctx) {
+        // Manejo de rotación en canvas
+        if (state.rotation === 90 || state.rotation === 270) {
+          canvas.width = img.height;
+          canvas.height = img.width;
+        } else {
+          canvas.width = img.width;
+          canvas.height = img.height;
+        }
+
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((state.rotation * Math.PI) / 180);
+
         let fs = `brightness(${state.brightness}%) contrast(${state.contrast}%) saturate(${state.saturation}%)`;
         if (state.filter === 'grayscale') fs += ' grayscale(100%)';
-        if (state.filter === 'clean') fs += ' contrast(180%) brightness(110%) grayscale(100%)';
-        if (state.filter === 'high-contrast') fs += ' contrast(240%) brightness(105%) grayscale(100%)';
-        if (state.filter === 'vibrant') fs += ' saturate(160%) contrast(110%)';
 
+        // Filtros PRO estilo CamScanner (Magia DLKom)
+        if (state.filter === 'clean') fs += ' contrast(200%) brightness(110%) grayscale(100%)'; // Aclarar
+        if (state.filter === 'vibrant') fs += ' contrast(150%) brightness(105%) saturate(140%)'; // Mejorar
+
+        // El resto se maneja via OpenCV si es necesario, o se deja como base
         ctx.filter = fs;
-        ctx.drawImage(img, 0, 0);
-        const processedUrl = canvas.toDataURL('image/jpeg', 0.9);
+        ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+        // MOTOR DE FILTROS AVANZADOS (OpenCV)
+        if (state.filter === 'magic') {
+          applyMagicColor(canvas);
+        } else if (state.filter === 'bw') {
+          applyAdaptiveThreshold(canvas, { blockSize: 15, offset: 10 });
+        } else if (state.filter === 'clean') {
+          applyAdaptiveThreshold(canvas, { blockSize: 45, offset: 20 });
+        }
+
+        const processedUrl = canvas.toDataURL('image/jpeg', 0.95);
         setPages((prev: PageData[]) => {
           const updated = [...prev];
           updated[index] = { ...updated[index], processed: processedUrl, processing: state };
@@ -156,7 +309,8 @@ const App: React.FC = () => {
         });
       }
     };
-    img.src = page.original;
+    // IMPORTANTE: Aplicar filtros sobre la imagen RECORTADA/ENDEREZADA
+    img.src = page.cropped;
   };
 
   const finalizeAndSave = async (mode: 'local' | 'onedrive') => {
@@ -167,7 +321,12 @@ const App: React.FC = () => {
       generatePDF(pages, manualFileName);
     } else {
       await simulateCloudUpload(onedrivePath, manualFileName);
-      alert(`Éxito: Archivo subido a la carpeta compartida: ${onedrivePath}`);
+      setDialog({
+        show: true,
+        title: 'ScanerDLKom dice',
+        message: `Éxito: Archivo subido a la carpeta compartida: ${onedrivePath}`,
+        type: 'alert'
+      });
     }
 
     setScanHistory((prev: ScanResult[]) => [{
@@ -229,65 +388,153 @@ const App: React.FC = () => {
         </div>
       </header>
 
+      {/* CANVAS OCULTO PARA PROCESAMIENTO */}
+      <canvas ref={canvasRef} className="hidden" />
+
       {/* MAIN CONTENT */}
       <main className="flex-1 flex flex-col gap-6">
         {step === AppStep.IDLE && (
-          <div className="grid grid-cols-2 gap-6 pt-2">
-            {/* Tarjeta de Nuevo Escaneo */}
+          <div className="flex flex-col items-center justify-center pt-8 animate-in fade-in duration-700">
+            {/* Botón Principal de Nuevo Escaneo */}
             <div
               onClick={startCamera}
-              className="col-span-2 bg-white rounded-[40px] p-12 shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-4 group cursor-pointer active:scale-95 transition-all"
+              className="w-full bg-white rounded-[48px] p-16 shadow-sm border border-slate-100 flex flex-col items-center justify-center gap-6 group cursor-pointer active:scale-95 transition-all text-center"
             >
-              <div className="bg-indigo-50 w-24 h-24 rounded-[32px] flex items-center justify-center group-hover:scale-110 transition-all">
-                <Camera className="w-10 h-10 text-indigo-500" />
+              <div className="bg-indigo-50 w-32 h-32 rounded-[40px] flex items-center justify-center group-hover:scale-110 transition-all shadow-inner">
+                <Camera className="w-14 h-14 text-indigo-500" />
               </div>
-              <h2 className="text-3xl font-black text-slate-800">Nuevo Escaneo</h2>
+              <div>
+                <h2 className="text-4xl font-black text-slate-800 tracking-tight">Nuevo Escaneo</h2>
+                <p className="text-slate-400 font-bold uppercase tracking-[0.3em] text-[10px] mt-4">DLKom Gestión Pro</p>
+              </div>
             </div>
-
-            {/* Accesos Rápidos Estilo Matriz */}
-            <button
-              onClick={() => setStep(AppStep.HISTORY)}
-              className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col items-center gap-4 hover:bg-slate-50 transition-all group"
-            >
-              <div className="w-16 h-16 bg-purple-100 rounded-2xl flex items-center justify-center text-purple-600 group-hover:rotate-6 transition-all shadow-sm">
-                <History className="w-8 h-8" />
-              </div>
-              <span className="text-sm font-bold text-slate-700">Historial</span>
-            </button>
-
-            <button
-              className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 flex flex-col items-center gap-4 hover:bg-slate-50 transition-all group"
-            >
-              <div className="w-16 h-16 bg-rose-100 rounded-2xl flex items-center justify-center text-rose-600 group-hover:-rotate-6 transition-all shadow-sm">
-                <CreditCard className="w-8 h-8" />
-              </div>
-              <span className="text-sm font-bold text-slate-700">Gastos</span>
-            </button>
           </div>
         )}
 
         {step === AppStep.CAPTURE && (
-          <div className="relative h-[70vh] rounded-[48px] overflow-hidden bg-black shadow-2xl">
-            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover opacity-90" />
-            <div className="absolute top-8 left-8 bg-white/90 backdrop-blur-md px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-800 border border-white/20">
-              {pages.length} ESCANEOS
+          <div className="relative h-[72vh] rounded-[48px] overflow-hidden bg-black shadow-2xl animate-in fade-in duration-500">
+            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover opacity-90 transition-opacity" />
+
+            {/* Indicador de Páginas */}
+            <div className="absolute top-8 left-8 flex items-center gap-3">
+              <div className="bg-white/90 backdrop-blur-md px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-800 border border-white/20 shadow-xl">
+                {pages.length} ESCANEOS
+              </div>
+              {pages.length > 0 && (
+                <button
+                  onClick={() => {
+                    (videoRef.current?.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+                    setStep(AppStep.CROP);
+                  }}
+                  className="bg-indigo-500 px-4 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-white shadow-lg animate-pulse active:scale-95 transition-all"
+                >
+                  Pulsa aquí para Recortar ✓
+                </button>
+              )}
             </div>
+
             <div className="absolute bottom-12 inset-x-0 px-10 flex justify-between items-center">
-              <div className="w-16 h-16 bg-white/20 backdrop-blur-md rounded-2xl border border-white/20 overflow-hidden shadow-xl">
-                {pages.length > 0 && <img src={pages[pages.length - 1].processed} className="w-full h-full object-cover" />}
+              {/* Miniatura de la última captura */}
+              <div className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-2xl border-2 border-white/30 overflow-hidden shadow-xl flex items-center justify-center">
+                {pages.length > 0 ? (
+                  <img src={pages[pages.length - 1].processed} className="w-full h-full object-cover" />
+                ) : (
+                  <FileText className="w-6 h-6 text-white/40" />
+                )}
+              </div>
+
+              {/* Botón Disparador */}
+              <div className="flex flex-col items-center gap-3">
+                <button
+                  onClick={capturePhoto}
+                  className="w-24 h-24 bg-white rounded-full border-[8px] border-white/20 active:scale-90 transition-all shadow-2xl flex items-center justify-center group"
+                >
+                  <div className="w-16 h-16 rounded-full border-2 border-slate-100 group-active:bg-slate-50 transition-colors" />
+                </button>
+                {pages.length > 0 && (
+                  <span className="text-[9px] font-black text-white/60 tracking-widest animate-pulse">
+                    PULSA OTRA VEZ PARA AÑADIR PÁGINA
+                  </span>
+                )}
+              </div>
+
+              {/* Botón Ir a Revisión/Filtros/OCR */}
+              <button
+                onClick={() => {
+                  (videoRef.current?.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+                  setStep(AppStep.CROP);
+                }}
+                className={`w-18 h-18 rounded-2xl flex flex-col items-center justify-center gap-1 shadow-2xl active:scale-90 transition-all ${pages.length > 0 ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-white/20 border border-white/20 text-white/40'}`}
+                disabled={pages.length === 0}
+              >
+                <Check className={`w-8 h-8 ${pages.length > 0 ? 'text-white' : 'text-white/20'}`} />
+                <span className="text-[8px] font-black text-white px-2">LISTO</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === AppStep.CROP && activePageIndex !== null && (
+          <div className="flex flex-col gap-6 animate-in slide-in-from-bottom duration-500">
+            <div className="flex justify-between items-center px-2">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => rotatePage(activePageIndex, 'left')}
+                  className="w-12 h-12 bg-white rounded-2xl text-indigo-500 flex items-center justify-center shadow-sm border border-slate-100"
+                >
+                  <RotateCcw className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => rotatePage(activePageIndex, 'right')}
+                  className="w-12 h-12 bg-white rounded-2xl text-indigo-500 flex items-center justify-center shadow-sm border border-slate-100"
+                >
+                  <RotateCcw className="w-5 h-5 scale-x-[-1]" />
+                </button>
               </div>
               <button
-                onClick={capturePhoto}
-                className="w-20 h-20 bg-white rounded-full border-[6px] border-white/20 active:scale-95 transition-all shadow-2xl flex items-center justify-center"
+                onClick={() => performCrop(activePageIndex)}
+                className="bg-indigo-600 text-white px-8 py-3.5 rounded-2xl font-black shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
               >
-                <div className="w-14 h-14 rounded-full border-2 border-slate-200" />
+                Recortar
               </button>
-              <button
-                onClick={() => { (videoRef.current?.srcObject as MediaStream).getTracks().forEach(t => t.stop()); setStep(AppStep.REVIEW); }}
-                className="w-16 h-16 bg-emerald-500 rounded-2xl flex items-center justify-center shadow-emerald-500/30 shadow-2xl active:scale-95 transition-all"
-              >
-                <Check className="w-8 h-8 text-white" />
-              </button>
+            </div>
+
+            <p className="text-xs font-bold text-slate-400 px-2 uppercase tracking-widest">Arrastra las esquinas para ajustar el papel</p>
+
+            <div className="relative bg-slate-900 rounded-[40px] p-2 aspect-[3/4] overflow-hidden shadow-2xl border-4 border-white">
+              <img src={pages[activePageIndex].original} className="w-full h-full object-cover opacity-60" />
+
+              {/* SVG Overlay con coordenadas normalizadas 0-100 */}
+              <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
+                <polygon
+                  points={pages[activePageIndex].cropPoints?.map(p => `${p.x},${p.y}`).join(' ')}
+                  fill="rgba(79, 70, 229, 0.2)"
+                  stroke="#4f46e5"
+                  strokeWidth="0.8"
+                />
+              </svg>
+
+              {/* Tiradores de las esquinas */}
+              {pages[activePageIndex].cropPoints?.map((p, i) => (
+                <div
+                  key={i}
+                  className="absolute w-12 h-12 -ml-6 -mt-6 flex items-center justify-center touch-none z-10"
+                  style={{ left: `${p.x}%`, top: `${p.y}%` }}
+                  onTouchMove={(e) => {
+                    const rect = e.currentTarget.parentElement?.getBoundingClientRect();
+                    if (rect) {
+                      const touch = e.touches[0];
+                      const x = ((touch.clientX - rect.left) / rect.width) * 100;
+                      const y = ((touch.clientY - rect.top) / rect.height) * 100;
+                      updateCropPoint(activePageIndex, i, x, y);
+                    }
+                  }}
+                >
+                  <div className="w-8 h-8 bg-white rounded-full border-4 border-indigo-600 shadow-2xl flex items-center justify-center">
+                    <div className="w-2 h-2 bg-indigo-600 rounded-full" />
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -305,6 +552,12 @@ const App: React.FC = () => {
                 <div key={p.id} className="relative group bg-white rounded-[32px] p-2 shadow-sm border border-slate-100 transition-all hover:translate-y-[-4px]">
                   <img src={p.processed} className="rounded-[24px] aspect-[3/4] object-cover" onClick={() => { setActivePageIndex(i); setStep(AppStep.EDIT); }} />
                   <div className="absolute top-4 left-4 bg-slate-800 text-white w-7 h-7 rounded-xl text-[10px] flex items-center justify-center font-black">{i + 1}</div>
+                  <button
+                    onClick={() => { setActivePageIndex(i); setStep(AppStep.CROP); }}
+                    className="absolute bottom-4 right-4 bg-indigo-600 text-white p-2 rounded-xl shadow-lg border-2 border-white"
+                  >
+                    <Maximize2 className="w-4 h-4" />
+                  </button>
                   <button onClick={() => setPages(pages.filter((_, idx) => idx !== i))} className="absolute -top-3 -right-3 bg-rose-500 text-white p-2.5 rounded-full shadow-lg border-4 border-[#f8fafc]"><Trash2 className="w-4 h-4" /></button>
                 </div>
               ))}
@@ -365,14 +618,28 @@ const App: React.FC = () => {
             </div>
 
             <div className="bg-white rounded-[32px] p-8 shadow-sm border border-slate-100 space-y-8">
+              <div className="flex justify-between items-center mb-2">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Filtros Profesionales</label>
+                <div className="flex gap-2">
+                  <button onClick={() => rotatePage(activePageIndex, 'left')} className="p-2 bg-slate-50 rounded-xl text-slate-500"><RotateCcw className="w-4 h-4" /></button>
+                  <button onClick={() => rotatePage(activePageIndex, 'right')} className="p-2 bg-slate-50 rounded-xl text-slate-500"><RotateCcw className="w-4 h-4 scale-x-[-1]" /></button>
+                </div>
+              </div>
               <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-                {['clean', 'vibrant', 'grayscale', 'none'].map(f => (
+                {[
+                  { id: 'clean', label: 'Aclarar' },
+                  { id: 'vibrant', label: 'Mejorar' },
+                  { id: 'magic', label: 'Magia Pro' },
+                  { id: 'no-shadow', label: 'Sin Sombra' },
+                  { id: 'bw', label: 'B/N Pro' },
+                  { id: 'none', label: 'Original' }
+                ].map(f => (
                   <button
-                    key={f}
-                    onClick={() => applyFilterToPage(activePageIndex!, { ...pages[activePageIndex!].processing, filter: f as any })}
-                    className={`px-6 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shrink-0 ${pages[activePageIndex!].processing.filter === f ? 'bg-slate-900 text-white shadow-xl shadow-slate-900/20' : 'bg-slate-50 text-slate-400'}`}
+                    key={f.id}
+                    onClick={() => applyFilterToPage(activePageIndex!, { ...pages[activePageIndex!].processing, filter: f.id as any })}
+                    className={`px-5 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shrink-0 ${pages[activePageIndex!].processing.filter === f.id ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-500/20' : 'bg-slate-50 text-slate-400'}`}
                   >
-                    {f}
+                    {f.label}
                   </button>
                 ))}
               </div>
@@ -439,7 +706,134 @@ const App: React.FC = () => {
             </div>
           </div>
         )}
+        {step === AppStep.TOOLS && (
+          <div className="flex flex-col gap-8 animate-in slide-in-from-bottom duration-500 pb-10">
+            <div className="px-2">
+              <h2 className="text-3xl font-black text-slate-800">Herramientas AI</h2>
+              <p className="text-slate-400 font-bold uppercase tracking-widest text-[10px] mt-2">Potencia CamScanner Integrada</p>
+            </div>
+
+            {/* SECCIÓN ESCANEAR */}
+            <div className="space-y-4">
+              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] px-2">Escaneo Especializado</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <button onClick={startCamera} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center">
+                  <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-500"><CreditCard className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Tarjeta ID</span>
+                </button>
+                <button onClick={startCamera} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center">
+                  <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-500"><FileText className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Sacar Texto</span>
+                </button>
+                <button onClick={startCamera} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center">
+                  <div className="w-12 h-12 bg-rose-50 rounded-2xl flex items-center justify-center text-rose-500"><Users className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Fotos ID</span>
+                </button>
+                <button onClick={startCamera} className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center">
+                  <div className="w-12 h-12 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-500"><LayoutGrid className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Pizarra</span>
+                </button>
+              </div>
+            </div>
+
+            {/* SECCIÓN IMPORTAR */}
+            <div className="space-y-4">
+              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] px-2">Importar Archivos</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center cursor-pointer">
+                  <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-500"><ImageIcon className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Importar Fotos</span>
+                  <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    files.forEach(file => {
+                      const reader = new FileReader();
+                      reader.onload = (re) => {
+                        const dataUrl = re.target?.result as string;
+                        const img = new Image();
+                        img.onload = () => {
+                          const canvas = document.createElement('canvas');
+                          canvas.width = img.width;
+                          canvas.height = img.height;
+                          const ctx = canvas.getContext('2d');
+                          if (ctx) {
+                            ctx.drawImage(img, 0, 0);
+                            const detectedPoints = autoDetectEdges(canvas);
+                            const newPage: PageData = {
+                              id: Date.now().toString() + Math.random(),
+                              original: dataUrl,
+                              cropped: dataUrl,
+                              processed: dataUrl,
+                              processing: {
+                                brightness: 100,
+                                contrast: 130,
+                                saturation: 100,
+                                filter: 'magic',
+                                removeShadows: true,
+                                rotation: 0
+                              },
+                              cropPoints: detectedPoints
+                            };
+                            setPages(prev => [...prev, newPage]);
+                            // Aplicamos limpieza automática al importar
+                            setTimeout(() => {
+                              applyFilterToPage(pages.length, { ...newPage.processing, filter: 'magic' });
+                            }, 50);
+                          }
+                        };
+                        img.src = dataUrl;
+                      };
+                      reader.readAsDataURL(file);
+                    });
+                    setStep(AppStep.REVIEW);
+                  }} />
+                </label>
+                <button className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center">
+                  <div className="w-12 h-12 bg-purple-50 rounded-2xl flex items-center justify-center text-purple-500"><FolderOpen className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-700 uppercase">Importar PDF</span>
+                </button>
+              </div>
+            </div>
+
+            {/* SECCIÓN CONVERTIR */}
+            <div className="space-y-4">
+              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] px-2">Convertir Documentos</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <button className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center opacity-60">
+                  <div className="w-12 h-12 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-400"><FileText className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-500 uppercase">A Word</span>
+                </button>
+                <button className="bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm flex flex-col items-center gap-3 active:scale-95 transition-all text-center opacity-60">
+                  <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-400"><TrendingUp className="w-6 h-6" /></div>
+                  <span className="text-[11px] font-black text-slate-500 uppercase">A Excel</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
+
+      {/* FOOTER NAV (Restaurado y Simplificado) */}
+      <footer className="fixed bottom-0 inset-x-0 bg-white/80 backdrop-blur-xl border-t border-slate-100 px-10 py-6 flex justify-between items-center z-50">
+        <button onClick={() => setStep(AppStep.IDLE)} className={`flex flex-col items-center gap-2 transition-all ${step === AppStep.IDLE ? 'text-indigo-600 scale-110' : 'text-slate-300'}`}>
+          <LayoutGrid className="w-7 h-7" />
+          <span className="text-[9px] font-black uppercase tracking-widest">Inicio</span>
+        </button>
+
+        <button onClick={() => setStep(AppStep.TOOLS)} className={`flex flex-col items-center gap-2 transition-all ${step === AppStep.TOOLS ? 'text-indigo-600 scale-110' : 'text-slate-300'}`}>
+          <Sparkles className="w-7 h-7" />
+          <span className="text-[9px] font-black uppercase tracking-widest">Herramientas</span>
+        </button>
+
+        <button onClick={() => setStep(AppStep.HISTORY)} className={`flex flex-col items-center gap-2 transition-all ${step === AppStep.HISTORY ? 'text-indigo-600 scale-110' : 'text-slate-300'}`}>
+          <History className="w-7 h-7" />
+          <span className="text-[9px] font-black uppercase tracking-widest">Historial</span>
+        </button>
+
+        <button onClick={() => setShowSettings(true)} className="flex flex-col items-center gap-2 text-slate-300">
+          <Settings className="w-7 h-7" />
+          <span className="text-[9px] font-black uppercase tracking-widest">Ajustes</span>
+        </button>
+      </footer>
 
       {/* SETTINGS MODAL */}
       {showSettings && (
@@ -550,12 +944,71 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {/* BOTÓN DE EMERGENCIA */}
+            <div className="pt-4 border-t border-slate-50">
+              <button
+                onClick={() => {
+                  setDialog({
+                    show: true,
+                    title: 'ScanerDLKom dice',
+                    message: '¿Reparar aplicación? Se borrarán los ajustes locales y se forzará la actualización.',
+                    type: 'confirm',
+                    onConfirm: () => {
+                      localStorage.clear();
+                      caches.keys().then(names => names.forEach(n => caches.delete(n)));
+                      navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
+                      window.location.reload();
+                    }
+                  });
+                }}
+                className="w-full py-4 text-rose-500 font-black text-xs uppercase tracking-widest bg-rose-50 rounded-2xl border border-rose-100 active:scale-95 transition-all"
+              >
+                Reparar Aplicación (Limpiar Caché)
+              </button>
+            </div>
+
             <button
               onClick={() => setShowSettings(false)}
               className="w-full py-5 bg-slate-900 text-white rounded-[24px] font-black text-lg shadow-xl shadow-slate-900/20 mt-4 active:scale-95 transition-all"
             >
               Guardar y Cerrar
             </button>
+            {/* PANEL DE DEPURACIÓN (Solo visible si hay logs) */}
+            {logs.length > 0 && (
+              <div className="fixed top-2 right-2 z-[9999] bg-black/80 text-[8px] text-emerald-400 p-2 rounded-lg max-w-[150px] font-mono pointer-events-none">
+                {logs.map((l, i) => <div key={i} className="truncate">{l}</div>)}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* DIÁLOGO PERSONALIZADO */}
+      {dialog.show && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6 animate-in fade-in duration-200">
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => dialog.type === 'alert' && setDialog({ ...dialog, show: false })} />
+          <div className="bg-white w-full max-w-sm rounded-[32px] p-8 shadow-2xl relative animate-in zoom-in-95 duration-200 border border-slate-100">
+            <h4 className="text-xl font-black text-slate-800 mb-4">{dialog.title}</h4>
+            <p className="text-slate-500 font-medium mb-8 leading-relaxed">{dialog.message}</p>
+            <div className="flex gap-3">
+              {dialog.type === 'confirm' && (
+                <button
+                  onClick={() => setDialog({ ...dialog, show: false })}
+                  className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-2xl font-black text-xs uppercase tracking-widest active:scale-95 transition-all"
+                >
+                  Cancelar
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setDialog({ ...dialog, show: false });
+                  if (dialog.onConfirm) dialog.onConfirm();
+                }}
+                className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
+              >
+                {dialog.type === 'confirm' ? 'Confirmar' : 'Entendido'}
+              </button>
+            </div>
           </div>
         </div>
       )}
