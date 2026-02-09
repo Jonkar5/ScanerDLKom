@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scaner-dlkom-v3';
+const CACHE_NAME = 'scaner-dlkom-v5';
 const ASSETS = [
     './',
     './index.html',

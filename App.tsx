@@ -364,7 +364,10 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="text-2xl font-black text-slate-800 leading-none">ScanerDLKom</h1>
-            <p className="text-[11px] uppercase font-bold tracking-[0.2em] text-indigo-500 mt-1">Gestión Pro</p>
+            <p className="text-[11px] uppercase font-bold tracking-[0.2em] text-indigo-500 mt-1 flex items-center gap-2">
+              Gestión Pro
+              <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded-full tracking-tighter">V2.1 PRO</span>
+            </p>
           </div>
         </div>
         <div className="flex gap-3">
