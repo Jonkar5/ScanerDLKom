@@ -539,9 +539,10 @@ const App: React.FC = () => {
               {pages[activePageIndex].cropPoints?.map((p, i) => (
                 <div
                   key={i}
-                  className="absolute w-14 h-14 -ml-7 -mt-7 flex items-center justify-center touch-none z-10"
+                  className="absolute w-14 h-14 -ml-7 -mt-7 flex items-center justify-center touch-none z-10 cursor-move"
                   style={{ left: `${p.x}%`, top: `${p.y}%` }}
                   onTouchStart={() => setMagnifierPoint(p)}
+                  onMouseDown={() => setMagnifierPoint(p)}
                   onTouchMove={(e) => {
                     const rect = e.currentTarget.parentElement?.getBoundingClientRect();
                     if (rect) {
@@ -554,7 +555,21 @@ const App: React.FC = () => {
                       setMagnifierPoint({ x: nx, y: ny });
                     }
                   }}
+                  onMouseMove={(e) => {
+                    if (e.buttons === 1) { // Sóilo si el ratón está apretado
+                      const rect = e.currentTarget.parentElement?.getBoundingClientRect();
+                      if (rect) {
+                        const x = ((e.clientX - rect.left) / rect.width) * 100;
+                        const y = ((e.clientY - rect.top) / rect.height) * 100;
+                        const nx = Math.max(0, Math.min(100, x));
+                        const ny = Math.max(0, Math.min(100, y));
+                        updateCropPoint(activePageIndex, i, nx, ny);
+                        setMagnifierPoint({ x: nx, y: ny });
+                      }
+                    }
+                  }}
                   onTouchEnd={() => setMagnifierPoint(null)}
+                  onMouseUp={() => setMagnifierPoint(null)}
                 >
                   <div className="w-10 h-10 bg-white/90 backdrop-blur-sm rounded-full border-4 border-indigo-600 shadow-xl flex items-center justify-center">
                     <div className="w-3 h-3 bg-indigo-600 rounded-full animate-pulse" />
