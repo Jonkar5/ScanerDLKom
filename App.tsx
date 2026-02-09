@@ -4,7 +4,7 @@ import {
   FileText, Download, Cloud, Sparkles, RefreshCw,
   Trash2, FolderOpen, Maximize2, Zap, RotateCcw, Sliders,
   Plus, ChevronRight, Save, Edit3, Image as ImageIcon,
-  Users, CreditCard, TrendingUp, Calendar, LayoutGrid
+  Users, CreditCard, TrendingUp, Calendar, LayoutGrid, Scan
 } from 'lucide-react';
 import { AppStep, FilterType, ProcessingState, ScanResult, PageData, Point } from './types';
 import { analyzeDocument } from './services/geminiService';
@@ -365,11 +365,12 @@ const App: React.FC = () => {
           <div>
             <h1 className="text-2xl font-black text-slate-800 leading-none">ScanerDLKom</h1>
             <p className="text-[11px] uppercase font-bold tracking-[0.2em] text-indigo-500 mt-1 flex items-center gap-2">
-              Gestión Pro
-              <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded-full tracking-tighter">V2.1 PRO</span>
+              Gestión Pro v2.1.0 PRO
+              <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded-full animate-bounce">ACTUALIZADO</span>
             </p>
           </div>
         </div>
+        <script dangerouslySetInnerHTML={{ __html: `console.log("%c SCANER DLKOM V2.1 PRO LOADED", "color: white; background: red; font-size: 20px; font-weight: bold;");` }} />
         <div className="flex gap-3">
           <button
             onClick={() => window.location.reload()}
