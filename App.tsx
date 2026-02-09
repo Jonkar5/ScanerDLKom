@@ -45,6 +45,8 @@ const App: React.FC = () => {
     onConfirm?: () => void;
   }>({ show: false, title: '', message: '', type: 'alert' });
 
+  const [magnifierPoint, setMagnifierPoint] = useState<Point | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -165,8 +167,13 @@ const App: React.FC = () => {
           updated[index] = { ...updated[index], cropped: croppedUrl, processed: croppedUrl };
           return updated;
         });
+
+        // Aplicar automáticamente el filtro configurado (por defecto Magia Pro)
+        const updatedState = page.processing;
+        setTimeout(() => applyFilterToPage(index, updatedState), 50);
+
         setStep(AppStep.REVIEW);
-        addLog("Página enderezada y recortada con éxito.");
+        addLog("Página enderezada y lista.");
       }
     };
     img.src = page.original;
@@ -205,12 +212,11 @@ const App: React.FC = () => {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0);
-        addLog("Foto capturada. Detectando bordes...");
+        addLog("Foto capturada. Analizando documento...");
         const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
 
-        // Auto-detección de bordes real
+        // Auto-detección con el nuevo motor PRO
         const detectedPoints = autoDetectEdges(canvas);
-        addLog("Bordes detectados: " + JSON.stringify(detectedPoints[0]));
 
         const newPage: PageData = {
           id: Date.now().toString(),
@@ -219,9 +225,9 @@ const App: React.FC = () => {
           processed: dataUrl,
           processing: {
             brightness: 100,
-            contrast: 130,
+            contrast: 100,
             saturation: 100,
-            filter: 'magic', // Ahora por defecto para impresionar con nitidez
+            filter: 'magic',
             removeShadows: true,
             rotation: 0
           },
@@ -231,28 +237,17 @@ const App: React.FC = () => {
         const newIndex = pagesRef.current.length;
         setPages(prev => [...prev, newPage]);
         setActivePageIndex(newIndex);
-        addLog(`Página ${newIndex} en cola.`);
 
-        // Feedback visual y HÁPTICO
+        // Feedback háptico y visual
         if ('vibrate' in navigator) navigator.vibrate(50);
-        const videoEl = videoRef.current;
-        videoEl.style.opacity = '0.4';
-        setTimeout(() => {
-          if (videoRef.current) videoRef.current.style.opacity = '0.9';
 
-          // FLUJO AUTOMÁTICO: Recortar y Aplicar Filtro Magia Pro instantáneamente
-          setTimeout(() => {
-            performCrop(newIndex, newPage); // Pass newPage directly
-            setTimeout(() => {
-              // Re-leer de ref para asegurar que tenemos la página recortada
-              const updatedPage = pagesRef.current[newIndex];
-              if (updatedPage) {
-                applyFilterToPage(newIndex, { ...newPage.processing, filter: 'magic' }, updatedPage);
-                addLog("Limpieza Magia Pro aplicada.");
-              }
-            }, 500);
-          }, 300);
-        }, 100);
+        // Detener cámara temporalmente para ahorro de batería/recursos
+        if (videoRef.current?.srcObject) {
+          (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+        }
+
+        // SALTO OBLIGATORIO A AJUSTE (Estilo CamScanner)
+        setTimeout(() => setStep(AppStep.CROP), 100);
       }
     }
   };
@@ -477,64 +472,125 @@ const App: React.FC = () => {
         {step === AppStep.CROP && activePageIndex !== null && (
           <div className="flex flex-col gap-6 animate-in slide-in-from-bottom duration-500">
             <div className="flex justify-between items-center px-2">
-              <div className="flex gap-2">
-                <button
-                  onClick={() => rotatePage(activePageIndex, 'left')}
-                  className="w-12 h-12 bg-white rounded-2xl text-indigo-500 flex items-center justify-center shadow-sm border border-slate-100"
-                >
-                  <RotateCcw className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => rotatePage(activePageIndex, 'right')}
-                  className="w-12 h-12 bg-white rounded-2xl text-indigo-500 flex items-center justify-center shadow-sm border border-slate-100"
-                >
-                  <RotateCcw className="w-5 h-5 scale-x-[-1]" />
-                </button>
-              </div>
               <button
-                onClick={() => performCrop(activePageIndex)}
-                className="bg-indigo-600 text-white px-8 py-3.5 rounded-2xl font-black shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
+                onClick={startCamera}
+                className="bg-white text-indigo-500 w-14 h-14 rounded-2xl flex flex-col items-center justify-center shadow-lg border-2 border-indigo-50 active:scale-90 transition-all"
               >
-                Recortar
+                <Plus className="w-6 h-6" />
+                <span className="text-[8px] font-black mt-0.5">AÑADIR</span>
+              </button>
+
+              <div className="flex-1 text-center">
+                <h2 className="text-xl font-black text-slate-800">Ajustar Bordes</h2>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{activePageIndex + 1} de {pages.length} páginas</p>
+              </div>
+
+              <button
+                onClick={() => {
+                  performCrop(activePageIndex);
+                  setStep(AppStep.REVIEW);
+                }}
+                className="bg-emerald-500 text-white w-14 h-14 rounded-2xl flex flex-col items-center justify-center shadow-lg shadow-emerald-200 active:scale-90 transition-all"
+              >
+                <Check className="w-6 h-6" />
+                <span className="text-[8px] font-black mt-0.5">LISTO</span>
               </button>
             </div>
 
-            <p className="text-xs font-bold text-slate-400 px-2 uppercase tracking-widest">Arrastra las esquinas para ajustar el papel</p>
+            <div className="relative bg-slate-100 rounded-[40px] p-1 aspect-[3/4] overflow-hidden shadow-2xl border-4 border-white">
+              <img src={pages[activePageIndex].original} className="w-full h-full object-cover opacity-80" />
 
-            <div className="relative bg-slate-900 rounded-[40px] p-2 aspect-[3/4] overflow-hidden shadow-2xl border-4 border-white">
-              <img src={pages[activePageIndex].original} className="w-full h-full object-cover opacity-60" />
+              {/* LUPA (MAGNIFIER) - Se muestra al arrastrar */}
+              {magnifierPoint && (
+                <div
+                  className="absolute w-32 h-32 rounded-full border-4 border-white shadow-2xl overflow-hidden z-50 pointer-events-none bg-black"
+                  style={{
+                    left: `${magnifierPoint.x > 50 ? magnifierPoint.x - 25 : magnifierPoint.x + 25}%`,
+                    top: `${magnifierPoint.y > 50 ? magnifierPoint.y - 25 : magnifierPoint.y + 25}%`,
+                    transform: 'translate(-50%, -50%)'
+                  }}
+                >
+                  <div
+                    className="w-[400%] h-[400%] absolute"
+                    style={{
+                      backgroundImage: `url(${pages[activePageIndex].original})`,
+                      backgroundSize: '100% 100%',
+                      backgroundPosition: `${magnifierPoint.x}% ${magnifierPoint.y}%`,
+                      transform: 'translate(-37.5%, -37.5%) scale(4)' // Zoom 4x
+                    }}
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="w-4 h-4 border-2 border-indigo-500 rounded-full" />
+                    <div className="absolute w-full h-[1px] bg-indigo-500/30" />
+                    <div className="absolute h-full w-[1px] bg-indigo-500/30" />
+                  </div>
+                </div>
+              )}
 
-              {/* SVG Overlay con coordenadas normalizadas 0-100 */}
               <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
                 <polygon
                   points={pages[activePageIndex].cropPoints?.map(p => `${p.x},${p.y}`).join(' ')}
-                  fill="rgba(79, 70, 229, 0.2)"
+                  fill="rgba(79, 70, 229, 0.15)"
                   stroke="#4f46e5"
-                  strokeWidth="0.8"
+                  strokeWidth="0.5"
                 />
               </svg>
 
-              {/* Tiradores de las esquinas */}
               {pages[activePageIndex].cropPoints?.map((p, i) => (
                 <div
                   key={i}
-                  className="absolute w-12 h-12 -ml-6 -mt-6 flex items-center justify-center touch-none z-10"
+                  className="absolute w-14 h-14 -ml-7 -mt-7 flex items-center justify-center touch-none z-10"
                   style={{ left: `${p.x}%`, top: `${p.y}%` }}
+                  onTouchStart={() => setMagnifierPoint(p)}
                   onTouchMove={(e) => {
                     const rect = e.currentTarget.parentElement?.getBoundingClientRect();
                     if (rect) {
                       const touch = e.touches[0];
                       const x = ((touch.clientX - rect.left) / rect.width) * 100;
                       const y = ((touch.clientY - rect.top) / rect.height) * 100;
-                      updateCropPoint(activePageIndex, i, x, y);
+                      const nx = Math.max(0, Math.min(100, x));
+                      const ny = Math.max(0, Math.min(100, y));
+                      updateCropPoint(activePageIndex, i, nx, ny);
+                      setMagnifierPoint({ x: nx, y: ny });
                     }
                   }}
+                  onTouchEnd={() => setMagnifierPoint(null)}
                 >
-                  <div className="w-8 h-8 bg-white rounded-full border-4 border-indigo-600 shadow-2xl flex items-center justify-center">
-                    <div className="w-2 h-2 bg-indigo-600 rounded-full" />
+                  <div className="w-10 h-10 bg-white/90 backdrop-blur-sm rounded-full border-4 border-indigo-600 shadow-xl flex items-center justify-center">
+                    <div className="w-3 h-3 bg-indigo-600 rounded-full animate-pulse" />
                   </div>
                 </div>
               ))}
+            </div>
+
+            <div className="flex justify-center gap-4 px-2">
+              <button onClick={() => rotatePage(activePageIndex, 'left')} className="p-4 bg-white rounded-2xl shadow-sm border border-slate-100"><RotateCcw className="w-6 h-6 text-slate-400" /></button>
+              <button onClick={() => rotatePage(activePageIndex, 'right')} className="p-4 bg-white rounded-2xl shadow-sm border border-slate-100"><RotateCcw className="w-6 h-6 text-slate-400 scale-x-[-1]" /></button>
+              <button
+                onClick={() => {
+                  const img = new Image();
+                  img.onload = () => {
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = img.width;
+                    tempCanvas.height = img.height;
+                    const tctx = tempCanvas.getContext('2d');
+                    if (tctx) {
+                      tctx.drawImage(img, 0, 0);
+                      const detected = autoDetectEdges(tempCanvas);
+                      setPages(prev => {
+                        const up = [...prev];
+                        up[activePageIndex].cropPoints = detected;
+                        return up;
+                      });
+                      addLog("Re-detección completada.");
+                    }
+                  };
+                  img.src = pages[activePageIndex].original;
+                }}
+                className="px-6 bg-indigo-50 text-indigo-600 rounded-2xl font-black text-[10px] uppercase tracking-widest border border-indigo-100"
+              >
+                Auto-Detectar
+              </button>
             </div>
           </div>
         )}

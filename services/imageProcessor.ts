@@ -2,7 +2,7 @@ import { Point } from '../types';
 
 /**
  * Motor de Procesamiento de Imagen Avanzado DLKom Pro (Powered by OpenCV.js)
- * Implementa algoritmos de grado profesional para igualar la potencia de CamScanner
+ * Optimizaciones CamScanner Parity v2.0
  */
 
 const getCV = () => (window as any).cv;
@@ -14,28 +14,20 @@ const sortPoints = (points: Point[]): Point[] => {
     if (points.length !== 4) return points;
 
     // Método robusto: Suma y Diferencia
-    // TL: min sum (x+y)
-    // BR: max sum (x+y)
-    // TR: max diff (x-y)
-    // BL: min diff (x-y)
-
     const sortedBySum = [...points].sort((a, b) => (a.x + a.y) - (b.x + b.y));
     const sortedByDiff = [...points].sort((a, b) => (a.x - a.y) - (b.x - b.y));
 
     return [
-        sortedBySum[0], // TL
-        sortedByDiff[sortedByDiff.length - 1], // TR
-        sortedBySum[sortedBySum.length - 1], // BR
-        sortedByDiff[0] // BL
+        sortedBySum[0], // TL (min sum)
+        sortedByDiff[sortedByDiff.length - 1], // TR (max diff x-y)
+        sortedBySum[sortedBySum.length - 1], // BR (max sum)
+        sortedByDiff[0] // BL (min diff x-y)
     ];
 };
 
 export const autoDetectEdges = (canvas: HTMLCanvasElement): Point[] => {
     const cv = getCV();
-    if (!cv || !cv.Mat) {
-        console.warn("OpenCV not ready. Using fallback detection.");
-        return [{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }];
-    }
+    if (!cv || !cv.Mat) return [{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }];
 
     try {
         let src = cv.imread(canvas);
@@ -43,65 +35,59 @@ export const autoDetectEdges = (canvas: HTMLCanvasElement): Point[] => {
         let blurred = new cv.Mat();
         let edged = new cv.Mat();
 
-        // 1. Gris y Blur para reducir ruido
+        // 1. Reducir ruido mucho más agresivamente para textiles/madera
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-        cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+        cv.bilateralFilter(gray, blurred, 9, 75, 75, cv.BORDER_DEFAULT);
 
-        // 2. Canny Edge Detection
-        cv.Canny(blurred, edged, 75, 200);
+        // 2. Canny con umbrales dinámicos (simplificado)
+        cv.Canny(blurred, edged, 50, 150);
 
-        // 3. Dilatar para unir bordes sueltos
-        let M = cv.Mat.ones(3, 3, cv.CV_8U);
-        cv.dilate(edged, edged, M);
+        // 3. Operación Morfológica: Cerrar huecos
+        let M = cv.Mat.ones(5, 5, cv.CV_8U);
+        cv.morphologyEx(edged, edged, cv.MORPH_CLOSE, M);
 
         // 4. Encontrar Contornos
         let contours = new cv.MatVector();
         let hierarchy = new cv.Mat();
-        cv.findContours(edged, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+        cv.findContours(edged, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
         let maxArea = 0;
-        let maxContourIndex = -1;
+        let bestPoints: Point[] | null = null;
 
         for (let i = 0; i < contours.size(); ++i) {
             let contour = contours.get(i);
             let area = cv.contourArea(contour);
-            if (area > maxArea) {
-                maxArea = area;
-                maxContourIndex = i;
-            }
-        }
 
-        if (maxContourIndex !== -1) {
-            let contour = contours.get(maxContourIndex);
-            let peri = cv.arcLength(contour, true);
-            let approx = new cv.Mat();
-            cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+            // El documento debe ser al menos el 15% de la imagen capturada
+            if (area > (canvas.width * canvas.height * 0.15)) {
+                let peri = cv.arcLength(contour, true);
+                let approx = new cv.Mat();
+                cv.approxPolyDP(contour, approx, 0.02 * peri, true);
 
-            if (approx.rows === 4) {
-                let points: Point[] = [];
-                for (let i = 0; i < 4; i++) {
-                    points.push({
-                        x: (approx.data32S[i * 2] / canvas.width) * 100,
-                        y: (approx.data32S[i * 2 + 1] / canvas.height) * 100
-                    });
+                if (approx.rows === 4 && area > maxArea) {
+                    maxArea = area;
+                    let pts: Point[] = [];
+                    for (let j = 0; j < 4; j++) {
+                        pts.push({
+                            x: (approx.data32S[j * 2] / canvas.width) * 100,
+                            y: (approx.data32S[j * 2 + 1] / canvas.height) * 100
+                        });
+                    }
+                    bestPoints = sortPoints(pts);
                 }
-
-                // Limpieza de Mats antes de retornar
-                src.delete(); gray.delete(); blurred.delete(); edged.delete();
-                M.delete(); contours.delete(); hierarchy.delete(); approx.delete();
-
-                return sortPoints(points);
+                approx.delete();
             }
-            approx.delete();
         }
 
         src.delete(); gray.delete(); blurred.delete(); edged.delete(); M.delete(); contours.delete(); hierarchy.delete();
+
+        if (bestPoints) return bestPoints;
     } catch (e) {
-        console.error("OpenCV Error:", e);
+        console.error("OpenCV AutoDetect Error:", e);
     }
 
-    // Default 10% margin
-    return [{ x: 5, y: 5 }, { x: 95, y: 5 }, { x: 95, y: 95 }, { x: 5, y: 95 }];
+    // Default 10% margin fallback
+    return [{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }];
 };
 
 export const applyPerspectiveTransform = (canvas: HTMLCanvasElement, points: Point[]): string => {
@@ -110,22 +96,21 @@ export const applyPerspectiveTransform = (canvas: HTMLCanvasElement, points: Poi
 
     try {
         let src = cv.imread(canvas);
+        const sorted = sortPoints(points);
 
-        // Puntos origen (en píxeles)
         let srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
-            points[0].x * canvas.width / 100, points[0].y * canvas.height / 100,
-            points[1].x * canvas.width / 100, points[1].y * canvas.height / 100,
-            points[2].x * canvas.width / 100, points[2].y * canvas.height / 100,
-            points[3].x * canvas.width / 100, points[3].y * canvas.height / 100
+            sorted[0].x * canvas.width / 100, sorted[0].y * canvas.height / 100,
+            sorted[1].x * canvas.width / 100, sorted[1].y * canvas.height / 100,
+            sorted[2].x * canvas.width / 100, sorted[2].y * canvas.height / 100,
+            sorted[3].x * canvas.width / 100, sorted[3].y * canvas.height / 100
         ]);
 
-        // Calcular dimensiones finales (Document Size real en píxeles)
-        const widthA = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y) * canvas.width / 100;
-        const widthB = Math.hypot(points[2].x - points[3].x, points[2].y - points[3].y) * canvas.width / 100;
+        const widthA = Math.hypot(sorted[1].x - sorted[0].x, sorted[1].y - sorted[0].y) * canvas.width / 100;
+        const widthB = Math.hypot(sorted[2].x - sorted[3].x, sorted[2].y - sorted[3].y) * canvas.width / 100;
         const maxWidth = Math.max(widthA, widthB);
 
-        const heightA = Math.hypot(points[1].x - points[2].x, points[1].y - points[2].y) * canvas.height / 100;
-        const heightB = Math.hypot(points[0].x - points[3].x, points[0].y - points[3].y) * canvas.height / 100;
+        const heightA = Math.hypot(sorted[1].x - sorted[2].x, sorted[1].y - sorted[2].y) * canvas.height / 100;
+        const heightB = Math.hypot(sorted[0].x - sorted[3].x, sorted[0].y - sorted[3].y) * canvas.height / 100;
         const maxHeight = Math.max(heightA, heightB);
 
         let dstPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
@@ -137,9 +122,7 @@ export const applyPerspectiveTransform = (canvas: HTMLCanvasElement, points: Poi
 
         let M = cv.getPerspectiveTransform(srcPts, dstPts);
         let dst = new cv.Mat();
-        let dsize = new cv.Size(maxWidth, maxHeight);
-
-        cv.warpPerspective(src, dst, M, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+        cv.warpPerspective(src, dst, M, new cv.Size(maxWidth, maxHeight), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
 
         const outCanvas = document.createElement('canvas');
         cv.imshow(outCanvas, dst);
@@ -161,14 +144,10 @@ export const applyAdaptiveThreshold = (canvas: HTMLCanvasElement, config: { bloc
         let src = cv.imread(canvas);
         let gray = new cv.Mat();
         let dst = new cv.Mat();
-
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY, 0);
-
         const bSize = config.blockSize % 2 === 0 ? config.blockSize + 1 : config.blockSize;
         cv.adaptiveThreshold(gray, dst, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, bSize, config.offset);
-
         cv.imshow(canvas, dst);
-
         src.delete(); gray.delete(); dst.delete();
     } catch (e) {
         console.error("Threshold Error:", e);
@@ -183,37 +162,43 @@ export const applyMagicColor = (canvas: HTMLCanvasElement) => {
         let src = cv.imread(canvas);
         let dst = new cv.Mat();
 
-        // 1. Mejorar el brillo y contraste inicial (Alpha: contraste, Beta: brillo)
-        src.convertTo(dst, -1, 1.2, 10);
+        // 1. Mejorar el contraste global mediante CLAHE (LAB Colorspace)
+        cv.cvtColor(src, dst, cv.COLOR_RGBA2RGB);
+        let lab = new cv.Mat();
+        cv.cvtColor(dst, lab, cv.COLOR_RGB2Lab);
+        let channels = new cv.MatVector();
+        cv.split(lab, channels);
+        let l = channels.get(0);
+        let clahe = new cv.CLAHE(3.0, new cv.Size(8, 8));
+        clahe.apply(l, l);
+        cv.merge(channels, lab);
+        cv.cvtColor(lab, dst, cv.COLOR_Lab2RGB);
 
-        // 2. Limpieza de fondo: Usamos un blur fuerte en una copia gris para detectar el 'iluminante'
+        // 2. Blanqueado Inteligente por división de iluminación
         let gray = new cv.Mat();
-        cv.cvtColor(dst, gray, cv.COLOR_RGBA2GRAY);
-
+        cv.cvtColor(dst, gray, cv.COLOR_RGB2GRAY);
         let blurred = new cv.Mat();
-        cv.GaussianBlur(gray, blurred, new cv.Size(75, 75), 0);
+        // Blur muy grande para detectar el fondo
+        cv.GaussianBlur(gray, blurred, new cv.Size(65, 65), 0);
 
-        // 3. Dividir imagen por el fondo detectado para aplanar la iluminación y blanquear
-        // result = (img / blurred) * 255
-        // En OpenCV.js esto se hace mejor con divide
-        let floatDst = new cv.Mat();
-        let floatBlurred = new cv.Mat();
-        dst.convertTo(floatDst, cv.CV_32F);
-        blurred.convertTo(floatBlurred, cv.CV_32F);
+        // Dividir: (Normal / Blurred) * 255 -> Blanquea el papel manteniendo texto
+        let result = new cv.Mat();
+        dst.convertTo(dst, cv.CV_32FC3);
+        let blurredFloat = new cv.Mat();
+        cv.cvtColor(blurred, blurredFloat, cv.COLOR_GRAY2RGB);
+        blurredFloat.convertTo(blurredFloat, cv.CV_32FC3);
 
-        for (let i = 0; i < 3; i++) {
-            // Procesar cada canal RGB por separado
-            // (Simplificado: usamos el canal de gris para todos)
-        }
+        cv.divide(dst, blurredFloat, result, 255);
+        result.convertTo(dst, cv.CV_8UC3);
 
-        // Realizamos un realce de blancos final
-        dst.convertTo(dst, -1, 1.4, -20);
+        // 3. Toque final: Aumentar contraste y brillo para "Look Digital"
+        dst.convertTo(dst, -1, 1.25, -15);
 
         cv.imshow(canvas, dst);
 
-        src.delete(); dst.delete(); gray.delete(); blurred.delete();
-        floatDst.delete(); floatBlurred.delete();
+        src.delete(); dst.delete(); lab.delete(); channels.delete(); l.delete(); clahe.delete();
+        gray.delete(); blurred.delete(); result.delete(); blurredFloat.delete();
     } catch (e) {
-        console.error("Magic Color Error:", e);
+        console.error("Magic Color 2.0 Error:", e);
     }
 };
